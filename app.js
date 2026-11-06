@@ -52,7 +52,12 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
     try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
     catch { return fallback; }
   };
-  const defaultSettings = () => ({ theme: 'light', pollSeconds: 30, thresholds: {} });
+  const THEME_KEY = 'maia.v1.theme';
+  const savedTheme = () => {
+    try { return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'; }
+    catch { return 'light'; }
+  };
+  const defaultSettings = () => ({ theme: savedTheme(), pollSeconds: 30, thresholds: {} });
   let currentUser = null;
   let authMode = 'signin';
   let authMessage = '';
@@ -113,6 +118,7 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
   const num = (value, digits = 1) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? Number(value).toLocaleString('pt-PT', { maximumFractionDigits: digits }) : '—';
   const setTheme = theme => {
     data.settings.theme = theme === 'dark' ? 'dark' : 'light';
+    try { localStorage.setItem(THEME_KEY, data.settings.theme); } catch {}
     document.documentElement.dataset.theme = data.settings.theme;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', data.settings.theme === 'dark' ? '#101b16' : '#f6f7f3');
     persist();
