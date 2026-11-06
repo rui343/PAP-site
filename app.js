@@ -1,3 +1,6 @@
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js';
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
+
 /* MAIA — lógica da aplicação.
    Os dados de gestão ficam no navegador. As medições só são mostradas quando
    são recebidas de uma API configurada pelo utilizador. */
@@ -8,6 +11,19 @@
     hives: 'maia.v1.hives', visits: 'maia.v1.visits', tasks: 'maia.v1.tasks',
     measurements: 'maia.v1.measurements', photos: 'maia.v1.photos', settings: 'maia.v1.settings'
   };
+  // Firebase Auth setup: replace these values with the configuration of your web app.
+  const firebaseConfig = {
+    apiKey: 'AIzaSyCYY8qiR1cetsM9tL6eaWmhcvUoHj41Rbw',
+    authDomain: 'maia-56e51.firebaseapp.com',
+    projectId: 'maia-56e51',
+    appId: '1:337977166303:web:b9a4582e684bcc08359c6a'
+  };
+  const firebaseConfigured = Object.values(firebaseConfig).every(value => value && !value.includes('COLE_AQUI'));
+  let firebaseAuth = null;
+  if (firebaseConfigured) {
+    try { firebaseAuth = getAuth(initializeApp(firebaseConfig)); } catch { firebaseAuth = null; }
+  }
+  const LEGACY_MIGRATION_KEY = 'maia.v1.accountMigrationComplete';
   const ICONS = {
     home: '<path d="m3 10 9-7 9 7v10h-6v-6H9v6H3V10Z"/>',
     dashboard: '<rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/>',
@@ -36,10 +52,16 @@
     try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
     catch { return fallback; }
   };
+  const defaultSettings = () => ({ theme: 'light', pollSeconds: 30, thresholds: {} });
+  let currentUser = null;
+  let authMode = 'signin';
+  let authMessage = '';
+  let authMessageKind = 'info';
+  let authBusy = false;
   const data = {
     hives: readJSON(KEYS.hives, []), visits: readJSON(KEYS.visits, []), tasks: readJSON(KEYS.tasks, []),
     measurements: readJSON(KEYS.measurements, []), photos: readJSON(KEYS.photos, []),
-    settings: { theme: 'light', pollSeconds: 30, thresholds: {}, ...readJSON(KEYS.settings, {}) }
+    settings: { ...defaultSettings(), ...readJSON(KEYS.settings, {}) }
   };
   let view = 'home';
   let selectedHive = null;
@@ -48,13 +70,34 @@
   let cameraState = 'unconfigured';
   let toastTimer = null;
 
+  const userStorageKey = (key, userId = currentUser?.id) => `${key}.user.${userId}`;
+  function resetData() {
+    data.hives = []; data.visits = []; data.tasks = []; data.measurements = []; data.photos = [];
+    data.settings = defaultSettings();
+  }
+  function loadUserData(userId) {
+    const hasAccountData = Object.values(KEYS).some(key => localStorage.getItem(userStorageKey(key, userId)) !== null);
+    const hasLegacyData = Object.values(KEYS).some(key => localStorage.getItem(key) !== null);
+    if (!hasAccountData && hasLegacyData && !localStorage.getItem(LEGACY_MIGRATION_KEY)) {
+      persist();
+      localStorage.setItem(LEGACY_MIGRATION_KEY, userId);
+      return;
+    }
+    data.hives = readJSON(userStorageKey(KEYS.hives, userId), []);
+    data.visits = readJSON(userStorageKey(KEYS.visits, userId), []);
+    data.tasks = readJSON(userStorageKey(KEYS.tasks, userId), []);
+    data.measurements = readJSON(userStorageKey(KEYS.measurements, userId), []);
+    data.photos = readJSON(userStorageKey(KEYS.photos, userId), []);
+    data.settings = { ...defaultSettings(), ...readJSON(userStorageKey(KEYS.settings, userId), {}) };
+  }
   const persist = () => {
-    localStorage.setItem(KEYS.hives, JSON.stringify(data.hives));
-    localStorage.setItem(KEYS.visits, JSON.stringify(data.visits));
-    localStorage.setItem(KEYS.tasks, JSON.stringify(data.tasks));
-    localStorage.setItem(KEYS.measurements, JSON.stringify(data.measurements));
-    localStorage.setItem(KEYS.photos, JSON.stringify(data.photos));
-    localStorage.setItem(KEYS.settings, JSON.stringify(data.settings));
+    if (!currentUser) return;
+    localStorage.setItem(userStorageKey(KEYS.hives), JSON.stringify(data.hives));
+    localStorage.setItem(userStorageKey(KEYS.visits), JSON.stringify(data.visits));
+    localStorage.setItem(userStorageKey(KEYS.tasks), JSON.stringify(data.tasks));
+    localStorage.setItem(userStorageKey(KEYS.measurements), JSON.stringify(data.measurements));
+    localStorage.setItem(userStorageKey(KEYS.photos), JSON.stringify(data.photos));
+    localStorage.setItem(userStorageKey(KEYS.settings), JSON.stringify(data.settings));
   };
   const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
   const icon = (name, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
@@ -114,15 +157,17 @@
   function renderTopbar() {
     const topbar = document.querySelector('#topbar');
     if (view === 'home') {
-      topbar.innerHTML = `<div class="topbar-inner">${logo()}<nav class="top-nav" id="top-nav"><a href="#funcionalidades">Funcionalidades</a><a href="#sobre">Sobre a MAIA</a></nav><div class="top-tools"><button class="icon-button" data-action="theme-toggle" aria-label="Alternar tema">${icon(data.settings.theme === 'dark' ? 'sun' : 'moon')}</button><button class="button primary" data-view="dashboard">Entrar no painel ${icon('arrow')}</button><button class="icon-button menu-button" data-action="menu" aria-label="Abrir menu">☰</button></div></div>`;
+      topbar.innerHTML = `<div class="topbar-inner">${logo()}<nav class="top-nav" id="top-nav"><a href="#funcionalidades">Funcionalidades</a><a href="#sobre">Sobre a MAIA</a></nav><div class="top-tools"><button class="icon-button" data-action="theme-toggle" aria-label="Alternar tema">${icon(data.settings.theme === 'dark' ? 'sun' : 'moon')}</button><button class="button primary" data-action="open-auth">Entrar no painel ${icon('arrow')}</button><button class="icon-button menu-button" data-action="menu" aria-label="Abrir menu">☰</button></div></div>`;
+    } else if (view === 'auth') {
+      topbar.innerHTML = `<div class="topbar-inner">${logo()}<div class="top-tools"><button class="button" data-view="home">Página inicial</button></div></div>`;
     } else {
-      topbar.innerHTML = `<div class="topbar-inner">${logo()}<nav class="top-nav" id="top-nav">${navItems.map(([id, label]) => `<a href="#${id}" data-view="${id}" class="${view === id || (view === 'hive-detail' && id === 'hives') ? 'active' : ''}">${label}</a>`).join('')}</nav><div class="top-tools"><button class="icon-button" data-action="theme-toggle" aria-label="Alternar tema">${icon(data.settings.theme === 'dark' ? 'sun' : 'moon')}</button><button class="button" data-view="home">Página inicial</button><button class="icon-button menu-button" data-action="menu" aria-label="Abrir menu">☰</button></div></div>`;
+      topbar.innerHTML = `<div class="topbar-inner">${logo()}<nav class="top-nav" id="top-nav">${navItems.map(([id, label, ico]) => `<a href="#${id}" data-view="${id}" class="${view === id || (view === 'hive-detail' && id === 'hives') ? 'active' : ''}">${label}</a>`).join('')}</nav><div class="top-tools"><button class="icon-button" data-action="theme-toggle" aria-label="Alternar tema">${icon(data.settings.theme === 'dark' ? 'sun' : 'moon')}</button><button class="button" data-action="sign-out">Terminar sessão</button><button class="icon-button menu-button" data-action="menu" aria-label="Abrir menu">☰</button></div></div>`;
     }
   }
   function renderHome() {
     return `<div class="landing">
       <section class="landing-hero" id="sobre">
-        <div class="landing-copy"><p class="eyebrow">Plataforma inteligente de gestão e monitorização de apiários</p><h1>Mais cuidado com as colmeias.<br><span>Mais visão do apiário.</span></h1><p>A MAIA reúne num só lugar as medições ambientais, o peso das colmeias, as imagens e o trabalho diário do apicultor.</p><div class="landing-actions"><button class="button primary" data-view="dashboard">Entrar no painel ${icon('arrow')}</button><a class="button outline" href="#funcionalidades">Conhecer funcionalidades</a></div><p class="landing-meta">Projeto de apicultura e tecnologia · Sem autenticação nesta versão</p></div>
+        <div class="landing-copy"><p class="eyebrow">Plataforma inteligente de gestão e monitorização de apiários</p><h1>Mais cuidado com as colmeias.<br><span>Mais visão do apiário.</span></h1><p>A MAIA reúne num só lugar as medições ambientais, o peso das colmeias, as imagens e o trabalho diário do apicultor.</p><div class="landing-actions"><button class="button primary" data-action="open-auth">Entrar no painel ${icon('arrow')}</button><a class="button outline" href="#funcionalidades">Conhecer funcionalidades</a></div><p class="landing-meta">Projeto de apicultura e tecnologia · Cria uma conta ou inicia sessão para abrir o painel.</p></div>
         <div class="apiary-art" role="img" aria-label="Ilustração de apiário entre árvores e colmeias"><svg viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#b7d4a8"/><stop offset="1" stop-color="#e8d797"/></linearGradient><linearGradient id="hill" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#7eae75"/><stop offset="1" stop-color="#426f4d"/></linearGradient></defs><rect x="8" y="12" width="584" height="374" rx="30" fill="url(#sky)"/><circle cx="475" cy="86" r="43" fill="#f5d679" opacity=".96"/><path d="M9 221c92-56 169-41 251 2 87-45 203-60 332-4v137H9V221Z" fill="#8cb580"/><path d="M9 263c110-46 213-10 293 14 95-39 194-33 290-5v104H9V263Z" fill="url(#hill)"/><path d="M55 274c22-92 78-125 123-134-4 67-38 123-123 134Z" fill="#315e43"/><path d="M68 257c26-64 57-91 98-112M529 267c-11-86-54-129-92-152 0 69 26 125 92 152Z" fill="#315e43"/><path d="M500 249c-16-69-44-104-77-133" stroke="#d4d3a1" stroke-width="5" fill="none"/><g transform="translate(205 174)"><path d="M17 53h130v102H17z" fill="#d49b3d"/><path d="M9 48h146v17H9zM16 79h132v13H16zM16 108h132v13H16z" fill="#f0c56a" stroke="#9b6726" stroke-width="3"/><path d="M50 155v20m64-20v20" stroke="#684a27" stroke-width="8" stroke-linecap="round"/><path d="M65 133h34v22H65z" fill="#704b28"/><path d="M72 142h20" stroke="#e2b75a" stroke-width="3"/></g><g transform="translate(374 218) scale(.68)"><path d="M17 53h130v102H17z" fill="#d49b3d"/><path d="M9 48h146v17H9zM16 79h132v13H16zM16 108h132v13H16z" fill="#f0c56a" stroke="#9b6726" stroke-width="3"/><path d="M50 155v20m64-20v20" stroke="#684a27" stroke-width="8" stroke-linecap="round"/><path d="M65 133h34v22H65z" fill="#704b28"/></g><g transform="translate(96 102)"><ellipse cx="18" cy="14" rx="10" ry="7" fill="#fff5d8" opacity=".9"/><ellipse cx="35" cy="14" rx="10" ry="7" fill="#fff5d8" opacity=".9"/><ellipse cx="27" cy="18" rx="13" ry="9" fill="#252f24"/><path d="M21 11v14m12-14v14" stroke="#edb745" stroke-width="4"/><path d="m27 8 4-6m-4 6-5-6" stroke="#252f24" stroke-width="2" stroke-linecap="round"/></g><g fill="#f4db8d"><circle cx="179" cy="300" r="4"/><circle cx="167" cy="316" r="3"/><circle cx="455" cy="303" r="4"/><circle cx="433" cy="323" r="3"/><circle cx="300" cy="279" r="3"/></g><rect x="8" y="12" width="584" height="374" rx="30" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="2"/></svg></div>
       </section>
       <section class="feature-section" id="funcionalidades"><div class="view-width"><p class="eyebrow">Uma visão completa do apiário</p><h2>As ferramentas do apicultor, ligadas entre si.</h2><p class="section-intro">Organiza a informação das colmeias, acompanha sensores e mantém o registo do trabalho realizado. O painel não inventa medições: os valores aparecem quando a fonte real estiver ligada.</p><div class="feature-grid">
@@ -135,6 +180,17 @@
     </div>`;
   }
 
+  function renderAuthPage() {
+    if (!firebaseAuth) {
+      const message = firebaseConfigured
+        ? 'Não foi possível iniciar o Firebase Auth. Confirma a configuração da aplicação Web e tenta novamente.'
+        : 'A autenticação ainda não está configurada. Cria uma aplicação Web Firebase e coloca os dados de configuração no início do ficheiro app.js.';
+      return `<div class="auth-page"><section class="card auth-card"><p class="eyebrow">Acesso à MAIA</p><h1>Ativar contas de utilizador</h1><p>${message}</p><div class="notice"><span class="notice-icon">i</span><div><strong>É necessária uma configuração única</strong><p>Depois da configuração, os utilizadores poderão criar conta com email e palavra-passe. As palavras-passe são geridas pelo Firebase Auth.</p></div></div><button class="button" data-view="home">Voltar à página inicial</button></section></div>`;
+    }
+    const creating = authMode === 'signup';
+    const feedbackClass = authMessageKind === 'error' ? 'auth-feedback error' : 'auth-feedback';
+    return `<div class="auth-page"><section class="card auth-card"><p class="eyebrow">Acesso à MAIA</p><h1>${creating ? 'Criar conta' : 'Entrar no painel'}</h1><p>${creating ? 'Regista o teu email e escolhe uma palavra-passe para começar.' : 'Inicia sessão para continuar para o painel do apiário.'}</p><form id="auth-form" class="auth-form"><div class="field"><label for="auth-email">Email</label><input id="auth-email" name="email" type="email" autocomplete="email" required maxlength="254" placeholder="nome@exemplo.pt"></div><div class="field"><label for="auth-password">Palavra-passe</label><input id="auth-password" name="password" type="password" autocomplete="${creating ? 'new-password' : 'current-password'}" required minlength="8" placeholder="Pelo menos 8 caracteres"></div>${creating ? '<div class="field"><label for="auth-password-confirm">Confirmar palavra-passe</label><input id="auth-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" required minlength="8" placeholder="Repete a palavra-passe"></div>' : ''}<p class="auth-hint">${creating ? 'Poderás ter de confirmar o email antes de entrar.' : 'Ainda não tens conta? Usa o botão abaixo para criar uma.'}</p><p class="${feedbackClass}" id="auth-feedback" role="status" aria-live="polite">${esc(authMessage)}</p><button class="button primary auth-submit" type="submit" ${authBusy ? 'disabled' : ''}>${authBusy ? 'Aguarda…' : creating ? 'Criar conta' : 'Entrar'}</button></form>${creating ? '' : '<button class="auth-switch" type="button" data-action="reset-password">Esqueci a palavra-passe</button>'}<button class="auth-switch" type="button" data-action="toggle-auth">${creating ? 'Já tenho conta — iniciar sessão' : 'Novo utilizador? Criar conta'}</button><p class="auth-privacy">Os dados do apiário continuam guardados neste navegador; ainda não são sincronizados entre dispositivos.</p></section></div>`;
+  }
   function pageHead(title, subtitle, action = '') {
     return `<div class="page-head"><div><p class="eyebrow">MAIA · Apiário</p><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`;
   }
@@ -294,7 +350,7 @@
       <section class="card settings-card"><h2>Limites de alerta</h2><p>Os limites ficam desativados até serem definidos pelo apicultor. Não são aplicados valores padrão.</p><form id="threshold-form" class="form-grid"><div class="field"><label for="temp-min">Temperatura mínima (°C)</label><input id="temp-min" type="number" step="0.1" value="${esc(t.tempMin ?? '')}" placeholder="Desativado"></div><div class="field"><label for="temp-max">Temperatura máxima (°C)</label><input id="temp-max" type="number" step="0.1" value="${esc(t.tempMax ?? '')}" placeholder="Desativado"></div><div class="field"><label for="hum-min">Humidade mínima (%)</label><input id="hum-min" type="number" step="0.1" value="${esc(t.humidityMin ?? '')}" placeholder="Desativado"></div><div class="field"><label for="hum-max">Humidade máxima (%)</label><input id="hum-max" type="number" step="0.1" value="${esc(t.humidityMax ?? '')}" placeholder="Desativado"></div><div class="field"><label for="weight-min">Peso mínimo (kg)</label><input id="weight-min" type="number" step="0.1" value="${esc(t.weightMin ?? '')}" placeholder="Desativado"></div><div class="field form-actions" style="align-self:end"><button class="button primary" type="submit">Guardar limites</button></div></form></section>
       <section class="card settings-card"><h2>Estado do sistema</h2><p>Estado observado por esta aplicação.</p><div class="system-list"><div class="system-item"><span>Sensores</span><strong>${sensorState === 'connected' ? 'A receber dados' : sensorState === 'error' ? 'Sem resposta' : 'Não ligados'}</strong></div><div class="system-item"><span>ESP32-CAM</span><strong>${cameraState === 'connected' ? 'Stream disponível' : s.cameraUrl ? 'URL configurado; ligação pendente' : 'Não configurada'}</strong></div><div class="system-item"><span>Base de dados online</span><strong>Não configurada</strong></div><div class="system-item"><span>Armazenamento atual</span><strong>Neste navegador</strong></div><div class="system-item"><span>Compatibilidade</span><strong>HTML · CSS · JavaScript · GitHub Pages</strong></div></div><p class="help-text" style="margin-top:12px">O GitHub Pages publica ficheiros estáticos. Para sincronizar entre dispositivos será necessário ligar uma API/base de dados externa.</p></section>
       <section class="card settings-card"><h2>Dados e cópias de segurança</h2><p>Exporta ou importa os registos guardados neste navegador.</p><div style="display:flex;flex-wrap:wrap;gap:9px"><button class="button" data-action="export">${icon('export')} Exportar dados</button><label class="button" for="import-file">Importar cópia<input id="import-file" type="file" accept="application/json" hidden></label><button class="button danger" data-action="clear-local">Apagar dados locais</button></div></section>
-      <section class="card settings-card"><h2>Sobre a MAIA</h2><p>Plataforma Inteligente de Gestão e Monitorização de Apiários.</p><div class="system-list"><div class="system-item"><span>Projeto</span><strong>Apicultura e tecnologia</strong></div><div class="system-item"><span>Versão</span><strong>Protótipo funcional · 1.0</strong></div><div class="system-item"><span>PWA</span><strong>Preparada para evolução futura</strong></div><div class="system-item"><span>Autenticação por email</span><strong>Não implementada</strong></div></div></section></div>`;
+      <section class="card settings-card"><h2>Sobre a MAIA</h2><p>Plataforma Inteligente de Gestão e Monitorização de Apiários.</p><div class="system-list"><div class="system-item"><span>Projeto</span><strong>Apicultura e tecnologia</strong></div><div class="system-item"><span>Versão</span><strong>Protótipo funcional · 1.0</strong></div><div class="system-item"><span>PWA</span><strong>Preparada para evolução futura</strong></div><div class="system-item"><span>Autenticação por email</span><strong>${firebaseAuth ? 'Ativa (Firebase Auth)' : 'Por configurar'}</strong></div></div></section></div>`;
   }
 
   function renderPage() {
@@ -312,7 +368,8 @@
   function render() {
     renderTopbar();
     const app = document.querySelector('#app');
-    app.innerHTML = view === 'home' ? renderHome() : panelShell(renderPage());
+    if (!['home', 'auth'].includes(view) && !currentUser) view = 'auth';
+    app.innerHTML = view === 'home' ? renderHome() : view === 'auth' ? renderAuthPage() : panelShell(renderPage());
     bindPageEvents();
     bindCameraStream();
     setTheme(data.settings.theme);
@@ -390,6 +447,7 @@
   }
   function startPolling() {
     clearInterval(pollTimer);
+    if (!currentUser) { pollTimer = null; sensorState = 'unconfigured'; return; }
     if (data.settings.sensorUrl) {
       syncMeasurements(true);
       pollTimer = setInterval(() => syncMeasurements(true), Math.max(10, Number(data.settings.pollSeconds) || 30) * 1000);
@@ -418,14 +476,79 @@
     document.querySelectorAll('[data-view]').forEach(el => el.addEventListener('click', event => {
       event.preventDefault();
       const targetView = el.dataset.view;
+      if (!['home', 'auth'].includes(targetView) && !currentUser) {
+        view = 'auth'; authMode = 'signin'; authMessage = ''; authMessageKind = 'info'; render(); return;
+      }
+      if (targetView === 'auth') { view = 'auth'; authMode = 'signin'; authMessage = ''; authMessageKind = 'info'; render(); return; }
       if (targetView === 'hive-detail') { selectedHive = el.dataset.id; view = 'hive-detail'; }
       else { view = targetView; if (view === 'hives') selectedHive = null; }
       render(); window.scrollTo({ top: 0, behavior: 'smooth' });
     }));
+    document.querySelector('#auth-form')?.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (!firebaseAuth || authBusy) return;
+      const email = document.querySelector('#auth-email').value.trim();
+      const password = document.querySelector('#auth-password').value;
+      const creating = authMode === 'signup';
+      if (creating && password !== document.querySelector('#auth-password-confirm').value) {
+        authMessage = 'As palavras-passe não coincidem.'; authMessageKind = 'error'; render(); return;
+      }
+      authBusy = true; authMessage = ''; authMessageKind = 'info'; render();
+      try {
+        if (creating) {
+          const credential = await createUserWithEmailAndPassword(firebaseAuth, email, password);
+          await sendEmailVerification(credential.user, { url: `${window.location.origin}${window.location.pathname}` });
+          await signOut(firebaseAuth);
+          authMessage = 'Conta criada. Confirma o email que te enviámos e depois inicia sessão.';
+          authMessageKind = 'success';
+        } else {
+          const credential = await signInWithEmailAndPassword(firebaseAuth, email, password);
+          if (!credential.user.emailVerified) {
+            await sendEmailVerification(credential.user, { url: `${window.location.origin}${window.location.pathname}` });
+            await signOut(firebaseAuth);
+            authMessage = 'Confirma o teu email antes de entrar. Enviámos outra mensagem de confirmação.';
+            authMessageKind = 'success';
+          } else {
+            currentUser = { id: credential.user.uid, email: credential.user.email };
+            loadUserData(currentUser.id); view = 'dashboard'; startPolling();
+          }
+        }
+      } catch (error) {
+        const code = String(error?.code || '');
+        authMessage = code === 'auth/email-already-in-use' ? 'Este email já tem conta. Inicia sessão.'
+          : code === 'auth/invalid-credential' || code === 'auth/user-not-found' || code === 'auth/wrong-password' ? 'Email ou palavra-passe incorretos.'
+          : code === 'auth/weak-password' ? 'Escolhe uma palavra-passe mais forte, com pelo menos 8 caracteres.'
+          : code === 'auth/invalid-email' ? 'Escreve um endereço de email válido.'
+          : code === 'auth/network-request-failed' ? 'Sem ligação ao serviço. Verifica a Internet e tenta novamente.'
+          : 'Não foi possível concluir o pedido. Confirma os dados e tenta novamente.';
+        authMessageKind = 'error';
+      } finally {
+        authBusy = false;
+        if (view === 'auth') render();
+      }
+    });
     document.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', async event => {
       event.preventDefault();
       const action = el.dataset.action, id = el.dataset.id;
       if (action === 'menu') document.querySelector('#top-nav')?.classList.toggle('open');
+      if (action === 'open-auth') {
+        if (currentUser) view = 'dashboard';
+        else { view = 'auth'; authMode = 'signin'; authMessage = ''; authMessageKind = 'info'; }
+        render(); window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+      if (action === 'toggle-auth') { authMode = authMode === 'signup' ? 'signin' : 'signup'; authMessage = ''; authMessageKind = 'info'; render(); }
+      if (action === 'sign-out' && firebaseAuth) {
+        try { await signOut(firebaseAuth); }
+        catch { notify('Não foi possível terminar a sessão. Tenta novamente.'); }
+      }
+      if (action === 'reset-password' && firebaseAuth) {
+        const email = document.querySelector('#auth-email')?.value.trim();
+        if (!email) { authMessage = 'Escreve primeiro o teu email.'; authMessageKind = 'error'; render(); return; }
+        try {
+          await sendPasswordResetEmail(firebaseAuth, email, { url: `${window.location.origin}${window.location.pathname}` });
+          authMessage = 'Se existir uma conta para esse email, receberás uma mensagem para mudar a palavra-passe.'; authMessageKind = 'success'; render();
+        } catch { authMessage = 'Não foi possível enviar a mensagem. Confirma o email e tenta novamente.'; authMessageKind = 'error'; render(); }
+      }
       if (action === 'theme-toggle') { setTheme(data.settings.theme === 'light' ? 'dark' : 'light'); renderTopbar(); }
       if (action === 'add-hive') hiveForm();
       if (action === 'hive-detail') { selectedHive = id; view = 'hive-detail'; render(); }
@@ -438,7 +561,7 @@
       if (action === 'delete-visit' && confirm('Eliminar este registo de visita?')) { data.visits = data.visits.filter(v => v.id !== id); persist(); render(); notify('Visita eliminada.'); }
       if (action === 'delete-photo' && confirm('Eliminar esta fotografia guardada?')) { data.photos = data.photos.filter(p => p.id !== id); persist(); render(); notify('Fotografia eliminada.'); }
       if (action === 'export') exportData();
-      if (action === 'clear-local' && confirm('Apagar colmeias, tarefas, visitas, medições, fotografias e definições guardadas neste navegador?')) { Object.values(KEYS).forEach(k => localStorage.removeItem(k)); location.reload(); }
+      if (action === 'clear-local' && confirm('Apagar os dados deste apiário guardados neste navegador?')) { Object.values(KEYS).forEach(k => localStorage.removeItem(userStorageKey(k))); location.reload(); }
     }));
 
     document.querySelector('#monitor-hive')?.addEventListener('change', event => { selectedHive = event.target.value || null; render(); });
@@ -490,8 +613,27 @@
     const a = document.createElement('a'); a.href = url; a.download = `maia-copia-${today()}.json`; a.click(); URL.revokeObjectURL(url); notify('Cópia de segurança exportada.');
   }
 
+  function initAuth() {
+    if (!firebaseAuth) return;
+    onAuthStateChanged(firebaseAuth, user => {
+      if (user && !user.emailVerified) return;
+      if (!user) {
+        if (currentUser) {
+          currentUser = null; clearInterval(pollTimer); pollTimer = null; resetData(); view = 'home'; render();
+        }
+        return;
+      }
+      if (user.uid !== currentUser?.id) {
+        currentUser = { id: user.uid, email: user.email };
+        loadUserData(currentUser.id);
+        if (view === 'auth') view = 'dashboard';
+        startPolling(); render();
+      }
+    });
+  }
+
   document.addEventListener('keydown', event => { if (event.key === 'Escape') closeModal(); });
   document.documentElement.dataset.theme = data.settings.theme;
   render();
-  startPolling();
+  initAuth();
 })();
