@@ -74,6 +74,8 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
   let sensorState = 'unconfigured';
   let cameraState = 'unconfigured';
   let toastTimer = null;
+  const ipmaState = { places: null, weatherTypes: new Map(), windClasses: new Map(), forecast: null, forecastFor: null, loadingPlaces: false, loadingForecast: false, error: '' };
+  const IPMA_API = 'https://api.ipma.pt/open-data';
 
   const userStorageKey = (key, userId = currentUser?.id) => `${key}.user.${userId}`;
   function resetData() {
@@ -266,11 +268,90 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
     return `${pageHead('Painel principal', 'Resumo do estado dos apiários e da atividade recente.', `<button class="button" data-action="sync">${icon('refresh')} Atualizar dados</button>`)}
       <div class="card status-summary"><span class="stat-icon">${icon('bee')}</span><div><strong>Estado geral do apiário</strong><small>${apiaryStatus} · o estado reflete apenas a ligação e os dados recebidos.</small></div><i class="dot ${sensorState === 'connected' ? 'ok' : sensorState === 'error' ? 'error' : ''}"></i></div>
       ${sensorState === 'connected' ? '' : `<div class="notice"><span class="notice-icon">i</span><div><strong>Ligação aos sensores ainda não configurada</strong><p>Os indicadores ficam vazios até receberem medições reais. Configura a API em Definições.</p></div><button class="button small" data-view="settings">Configurar</button></div>`}
+      ${ipmaWeatherPanel()}
       <div class="grid stats-grid" style="margin-top:15px">${statCard('Total de colmeias', data.hives.length, 'Registadas neste navegador', 'hive')}${statCard('Temperatura média', t == null ? '<span class="data-empty">Sem dados</span>' : `${num(t)}<small> °C</small>`, 'Média das leituras mais recentes', 'temp', true)}${statCard('Humidade média', h == null ? '<span class="data-empty">Sem dados</span>' : `${num(h)}<small> %</small>`, 'Média das leituras mais recentes', 'drop')}${statCard('Peso médio registado', w == null ? '<span class="data-empty">Sem dados</span>' : `${num(w)}<small> kg</small>`, 'Apenas colmeias com leitura de peso', 'weight', true)}</div>
       <div class="section-row"><div><h2>Evolução das medições</h2><p>Gráficos construídos apenas com dados recebidos.</p></div><button class="section-action" data-view="monitoring">Ver monitorização →</button></div>
       <div class="grid chart-grid">${chartCard('Temperatura', 'Média dos sensores disponíveis · °C', sortedMeasurements(data.measurements), 'temperature')}${chartCard('Humidade', 'Média dos sensores disponíveis · %', sortedMeasurements(data.measurements), 'humidity')}${chartCard('Peso', 'Leitura da célula de carga · kg', sortedMeasurements(data.measurements), 'weight')}</div>
       <div class="two-col"><section><div class="section-row"><h2>Últimas medições</h2><button class="section-action" data-view="monitoring">Histórico →</button></div>${latestReadingRows(data.measurements, 5)}</section><section><div class="section-row"><h2>Alertas importantes</h2><button class="section-action" data-view="settings">Definir limites →</button></div>${currentAlerts()}</section></div>
       <section><div class="section-row"><div><h2>Atividade recente</h2><p>Visitas registadas e tarefas do apicultor.</p></div><button class="section-action" data-view="activities">Ver atividades →</button></div>${activity.length ? `<div class="table-wrap"><table><thead><tr><th>Data</th><th>Tipo</th><th>Registo</th><th>Colmeia</th></tr></thead><tbody>${activity.map(a => `<tr><td>${fmtDate(a.date)}</td><td>${esc(a.type)}</td><td>${esc(a.title)}${a.text ? ` · ${esc(a.text)}` : ''}</td><td>${esc(hiveLabel(a.hiveId))}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-state"><div><strong>Sem atividades registadas</strong>As visitas e tarefas aparecem aqui depois de serem criadas.</div></div>`}</section>`;
+  }
+
+  function selectedIpmaLocalityId() {
+    if (!ipmaState.places?.length) return '';
+    const savedId = String(data.settings.ipmaLocalityId || '');
+    if (savedId && ipmaState.places.some(place => String(place.globalIdLocal) === savedId)) return savedId;
+    const normalize = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    const locations = data.hives.map(h => normalize(h.location)).filter(Boolean);
+    const exactMatch = ipmaState.places.find(place => locations.includes(normalize(place.local)));
+    if (exactMatch) {
+      data.settings.ipmaLocalityId = String(exactMatch.globalIdLocal);
+      persist();
+      return String(exactMatch.globalIdLocal);
+    }
+    return '';
+  }
+  function ipmaWeatherPanel() {
+    const placeId = selectedIpmaLocalityId();
+    const place = ipmaState.places?.find(item => String(item.globalIdLocal) === placeId);
+    const options = (ipmaState.places || []).slice().sort((a, b) => a.local.localeCompare(b.local, 'pt-PT')).map(item => `<option value="${esc(item.globalIdLocal)}" ${String(item.globalIdLocal) === placeId ? 'selected' : ''}>${esc(item.local)}</option>`).join('');
+    let body = '<p class="weather-message">A carregar localidades do IPMA…</p>';
+    if (ipmaState.error) body = `<div class="weather-error"><p class="weather-message error">${esc(ipmaState.error)}</p>${!ipmaState.places ? '<button class="button small" data-action="ipma-places">Tentar novamente</button>' : ''}</div>`;
+    else if (ipmaState.loadingForecast) body = '<p class="weather-message">A obter a previsão do IPMA…</p>';
+    else if (!placeId) body = '<p class="weather-message">Escolhe a localidade mais próxima do apiário para consultar a previsão.</p>';
+    else if (ipmaState.forecastFor === placeId && ipmaState.forecast?.length) {
+      body = `<div class="weather-days">${ipmaState.forecast.slice(0, 5).map(item => {
+        const weather = ipmaState.weatherTypes.get(String(item.idWeatherType)) || 'Previsão diária';
+        const wind = ipmaState.windClasses.get(String(item.classWindSpeed)) || `classe ${item.classWindSpeed ?? '—'}`;
+        const rain = item.precipitaProb ?? item.probPrecipita;
+        return `<article class="weather-day"><span class="weather-date">${fmtDate(item.forecastDate, { weekday: 'short', day: '2-digit', month: 'short' })}</span><strong class="weather-description">${esc(weather)}</strong><div class="weather-temps"><strong>${item.tMax == null ? '—' : `${num(item.tMax, 0)}°`}</strong><span>${item.tMin == null ? '—' : `${num(item.tMin, 0)}°`}</span></div><span class="weather-detail">Chuva: ${rain == null ? '—' : `${num(rain, 0)}%`}</span><span class="weather-detail">Vento: ${esc(wind)} · ${esc(item.predWindDir || '—')}</span></article>`;
+      }).join('')}</div><p class="weather-updated">Atualização IPMA: ${ipmaState.updatedAt ? fmtDateTime(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(ipmaState.updatedAt) ? ipmaState.updatedAt : `${ipmaState.updatedAt}Z`) : 'não indicada'}</p>`;
+    } else if (placeId) body = '<p class="weather-message">Ainda não foi possível carregar a previsão.</p>';
+    const disabled = !ipmaState.places?.length || !placeId || ipmaState.loadingForecast;
+    return `<section class="card weather-panel"><div class="weather-heading"><div><p class="eyebrow">Fonte oficial · IPMA</p><h2>Clima previsto no apiário</h2><p>Previsão diária até 5 dias para ${place ? esc(place.local) : 'a localidade escolhida'}.</p></div><div class="weather-actions"><label class="weather-location"><span>Localidade do apiário</span><select id="ipma-location" ${ipmaState.places ? '' : 'disabled'}><option value="">Escolhe uma localidade…</option>${options}</select></label><button class="icon-button" data-action="ipma-refresh" aria-label="Atualizar previsão" title="Atualizar previsão" ${disabled ? 'disabled' : ''}>${icon('refresh')}</button></div></div><div id="ipma-weather-body">${body}</div><div class="weather-attribution"><span>Fonte: <a href="https://api.ipma.pt/" target="_blank" rel="noopener noreferrer">API aberta do IPMA</a></span><a href="https://www.ipma.pt/pt/otempo/prev.localidade.hora/" target="_blank" rel="noopener noreferrer">Consultar previsão oficial de 10 dias no IPMA ↗</a></div></section>`;
+  }
+  async function fetchIpmaJson(path) {
+    const response = await fetch(`${IPMA_API}/${path}`, { cache: 'no-store', headers: { Accept: 'application/json' } });
+    if (!response.ok) throw new Error(`O IPMA respondeu com o estado ${response.status}.`);
+    return response.json();
+  }
+  async function loadIpmaPlaces() {
+    if (ipmaState.loadingPlaces || ipmaState.places) return;
+    ipmaState.loadingPlaces = true;
+    try {
+      const [places, types, winds] = await Promise.all([
+        fetchIpmaJson('distrits-islands.json'), fetchIpmaJson('weather-type-classe.json'), fetchIpmaJson('wind-speed-daily-classe.json')
+      ]);
+      ipmaState.places = (places.data || []).filter(item => item.globalIdLocal && item.local);
+      ipmaState.weatherTypes = new Map((types.data || []).map(item => [String(item.idWeatherType), item.descWeatherTypePT]));
+      ipmaState.windClasses = new Map((winds.data || []).map(item => [String(item.classWindSpeed), item.descClassWindSpeedPT]));
+      ipmaState.error = '';
+    } catch {
+      ipmaState.error = 'Não foi possível obter as localidades do IPMA. Verifica a ligação à Internet e tenta novamente.';
+    } finally {
+      ipmaState.loadingPlaces = false;
+      if (view === 'dashboard') render();
+    }
+    const id = selectedIpmaLocalityId();
+    if (id && !ipmaState.error) await loadIpmaForecast(id);
+  }
+  async function loadIpmaForecast(placeId, force = false) {
+    if (!placeId || ipmaState.loadingForecast) return;
+    if (!force && ipmaState.forecastFor === placeId && ipmaState.forecast?.length) return;
+    ipmaState.loadingForecast = true; ipmaState.error = '';
+    if (view === 'dashboard') render();
+    try {
+      const payload = await fetchIpmaJson(`forecast/meteorology/cities/daily/${encodeURIComponent(placeId)}.json`);
+      ipmaState.forecast = Array.isArray(payload.data) ? payload.data.slice(0, 5) : [];
+      ipmaState.forecastFor = String(placeId);
+      ipmaState.updatedAt = payload.dataUpdate || '';
+      if (!ipmaState.forecast.length) ipmaState.error = 'O IPMA ainda não disponibilizou previsões para esta localidade.';
+    } catch {
+      ipmaState.forecast = null; ipmaState.forecastFor = null;
+      ipmaState.error = 'Não foi possível carregar a previsão do IPMA. Tenta novamente mais tarde.';
+    } finally {
+      ipmaState.loadingForecast = false;
+      if (view === 'dashboard') render();
+    }
   }
 
   function renderHives() {
@@ -384,6 +465,8 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
     bindPageEvents();
     bindCameraStream();
     setTheme(data.settings.theme);
+    if (view === 'dashboard' && !ipmaState.places && !ipmaState.loadingPlaces && !ipmaState.error) loadIpmaPlaces();
+    else if (view === 'dashboard' && ipmaState.places && selectedIpmaLocalityId() && ipmaState.forecastFor !== selectedIpmaLocalityId() && !ipmaState.loadingForecast && !ipmaState.error) loadIpmaForecast(selectedIpmaLocalityId());
   }
 
   function openModal(title, subtitle, body) {
@@ -561,6 +644,8 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
         } catch { authMessage = 'Não foi possível enviar a mensagem. Confirma o email e tenta novamente.'; authMessageKind = 'error'; render(); }
       }
       if (action === 'theme-toggle') { setTheme(data.settings.theme === 'light' ? 'dark' : 'light'); render(); }
+      if (action === 'ipma-refresh') { ipmaState.forecastFor = null; await loadIpmaForecast(selectedIpmaLocalityId(), true); }
+      if (action === 'ipma-places') { ipmaState.error = ''; ipmaState.places = null; await loadIpmaPlaces(); }
       if (action === 'add-hive') hiveForm();
       if (action === 'hive-detail') { selectedHive = id; view = 'hive-detail'; render(); }
       if (action === 'edit-hive') hiveForm(hiveFor(id));
@@ -576,6 +661,13 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
     }));
 
     document.querySelector('#monitor-hive')?.addEventListener('change', event => { selectedHive = event.target.value || null; render(); });
+    document.querySelector('#ipma-location')?.addEventListener('change', async event => {
+      data.settings.ipmaLocalityId = event.target.value;
+      data.settings.ipmaLocalityName = event.target.selectedOptions[0]?.textContent || '';
+      ipmaState.forecast = null; ipmaState.forecastFor = null; ipmaState.error = '';
+      persist(); render();
+      if (data.settings.ipmaLocalityId) await loadIpmaForecast(data.settings.ipmaLocalityId);
+    });
     document.querySelector('#visit-form')?.addEventListener('submit', event => {
       event.preventDefault(); data.visits.push({ id: uid(), hiveId: document.querySelector('#visit-hive').value, date: document.querySelector('#visit-date').value, type: document.querySelector('#visit-type').value, notes: document.querySelector('#visit-notes').value.trim() });
       persist(); render(); notify('Visita guardada.');
