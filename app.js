@@ -132,13 +132,14 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
     return valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null;
   };
   const sensorValues = record => {
-    if (!record) return { t11: [], h11: [], tAll: [], hAll: [], weight: null };
+    if (!record) return { t11: [], h11: [], t22: null, tAll: [], hAll: [], weight: null };
     const valid = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
     const t11 = [record.dht11_1?.temperature, record.dht11_2?.temperature].filter(valid).map(Number);
     const h11 = [record.dht11_1?.humidity, record.dht11_2?.humidity].filter(valid).map(Number);
-    const temps = [...t11, record.dht22?.temperature].filter(valid).map(Number);
+    const t22 = valid(record.dht22?.temperature) ? Number(record.dht22.temperature) : null;
+    const temps = [...t11, t22].filter(valid).map(Number);
     const hums = [...h11, record.dht22?.humidity].filter(valid).map(Number);
-    return { t11, h11, tAll: temps, hAll: hums, weight: valid(record.weightKg) ? Number(record.weightKg) : null };
+    return { t11, h11, t22, tAll: temps, hAll: hums, weight: valid(record.weightKg) ? Number(record.weightKg) : null };
   };
   const sortedMeasurements = records => [...records].sort((a, b) => new Date(a.measuredAt) - new Date(b.measuredAt));
   const latestMeasurements = () => {
@@ -206,15 +207,19 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
   function statCard(label, value, note, iconName, amber = false) {
     return `<article class="card stat-card"><div class="stat-head"><span>${label}</span><span class="stat-icon ${amber ? 'amber' : ''}">${icon(iconName)}</span></div><div class="stat-value">${value}</div><div class="stat-foot">${note}</div></article>`;
   }
-  function latestReadingRows(records, limit = 6) {
+  function latestReadingRows(records, limit = 6, perHive = false) {
     const rows = [...records].sort((a, b) => new Date(b.measuredAt) - new Date(a.measuredAt)).slice(0, limit);
     if (!rows.length) return `<div class="empty-state"><div><strong>Sem medições recebidas</strong>Configura a API dos sensores nas definições para começar a criar histórico.</div></div>`;
-    return `<div class="table-wrap"><table><thead><tr><th>Data e hora</th><th>Colmeia</th><th>Temp. média</th><th>Humidade média</th><th>Peso</th></tr></thead><tbody>${rows.map(r => { const v = sensorValues(r); return `<tr><td>${fmtDateTime(r.measuredAt)}</td><td>${esc(hiveLabel(r.hiveId))}</td><td>${num(average(v.tAll))}${v.tAll.length ? ' °C' : '—'}</td><td>${num(average(v.hAll))}${v.hAll.length ? ' %' : '—'}</td><td>${v.weight == null ? '—' : `${num(v.weight)} kg`}</td></tr>`; }).join('')}</tbody></table></div>`;
+    return `<div class="table-wrap"><table><thead><tr><th>Data e hora</th><th>Colmeia</th>${perHive ? '<th>Exterior · média DHT11</th><th>Interior · DHT22</th>' : '<th>Temp. média</th>'}<th>Humidade média</th><th>Peso</th></tr></thead><tbody>${rows.map(r => { const v = sensorValues(r); const temperatures = perHive ? `<td>${average(v.t11) == null ? '—' : `${num(average(v.t11))} °C`}</td><td>${v.t22 == null ? '—' : `${num(v.t22)} °C`}</td>` : `<td>${num(average(v.tAll))}${v.tAll.length ? ' °C' : '—'}</td>`; return `<tr><td>${fmtDateTime(r.measuredAt)}</td><td>${esc(hiveLabel(r.hiveId))}</td>${temperatures}<td>${num(average(v.hAll))}${v.hAll.length ? ' %' : '—'}</td><td>${v.weight == null ? '—' : `${num(v.weight)} kg`}</td></tr>`; }).join('')}</tbody></table></div>`;
   }
   function chartSvg(records, field, color = '#5a9b6e') {
     const points = records.map(r => {
       const v = sensorValues(r);
-      return { date: r.measuredAt, value: field === 'temperature' ? average(v.tAll) : field === 'humidity' ? average(v.hAll) : v.weight };
+      const value = field === 'outside-temperature' ? average(v.t11)
+        : field === 'inside-temperature' ? v.t22
+        : field === 'temperature' ? average(v.tAll)
+        : field === 'humidity' ? average(v.hAll) : v.weight;
+      return { date: r.measuredAt, value };
     }).filter(p => Number.isFinite(p.value)).slice(-18);
     if (!points.length) return `<div class="chart-empty">Ainda não existem medições reais para este gráfico.</div>`;
     const width = 600, height = 155, left = 32, right = 12, top = 12, bottom = 25;
@@ -286,9 +291,9 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
     const activity = activities().filter(a => a.hiveId === h.identifier);
     return `${pageHead(`${esc(h.identifier)} · ${esc(h.name)}`, `${esc(h.location || 'Localização por indicar')} · Instalada em ${fmtDate(h.installDate)}`, `<button class="button" data-action="edit-hive" data-id="${esc(h.identifier)}">${icon('edit')} Editar colmeia</button>`)}
       <div class="section-row"><h2>Última medição</h2><button class="section-action" data-view="monitoring">Abrir monitorização →</button></div>
-      <div class="grid stats-grid">${statCard('Temperatura média', average(vals.tAll) == null ? '<span class="data-empty">Sem dados</span>' : `${num(average(vals.tAll))}<small> °C</small>`, 'Leituras DHT disponíveis', 'temp', true)}${statCard('Humidade média', average(vals.hAll) == null ? '<span class="data-empty">Sem dados</span>' : `${num(average(vals.hAll))}<small> %</small>`, 'Leituras DHT disponíveis', 'drop')}${statCard('Peso atual', vals.weight == null ? '<span class="data-empty">Sem dados</span>' : `${num(vals.weight)}<small> kg</small>`, 'Célula de carga + HX711', 'weight', true)}${statCard('Medições guardadas', records.length, 'Recebidas da fonte configurada', 'sensor')}</div>
-      <div class="section-row"><h2>Histórico desta colmeia</h2></div><div class="grid chart-grid">${chartCard('Temperatura', 'Média dos sensores disponíveis · °C', records, 'temperature')}${chartCard('Humidade', 'Média dos sensores disponíveis · %', records, 'humidity')}${chartCard('Peso', 'Célula de carga · kg', records, 'weight')}</div>
-      <div class="two-col"><section><div class="section-row"><h2>Medições</h2></div>${latestReadingRows(records, 20)}</section><section><div class="section-row"><h2>Visitas e tarefas</h2></div>${activity.length ? `<div class="table-wrap"><table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th></tr></thead><tbody>${activity.map(a => `<tr><td>${fmtDate(a.date)}</td><td>${esc(a.type)}</td><td>${esc(a.title)} · ${esc(a.text || '')}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-state"><div><strong>Sem histórico de atividades</strong>Os registos desta colmeia aparecerão aqui.</div></div>`}</section></div>
+      <div class="grid stats-grid">${statCard('Temperatura exterior', average(vals.t11) == null ? '<span class="data-empty">Sem dados</span>' : `${num(average(vals.t11))}<small> °C</small>`, 'Média dos dois DHT11', 'temp', true)}${statCard('Temperatura interior', vals.t22 == null ? '<span class="data-empty">Sem dados</span>' : `${num(vals.t22)}<small> °C</small>`, 'Leitura do DHT22 dentro da colmeia', 'temp')}${statCard('Humidade média', average(vals.hAll) == null ? '<span class="data-empty">Sem dados</span>' : `${num(average(vals.hAll))}<small> %</small>`, 'Leituras DHT disponíveis', 'drop')}${statCard('Peso atual', vals.weight == null ? '<span class="data-empty">Sem dados</span>' : `${num(vals.weight)}<small> kg</small>`, 'Célula de carga + HX711', 'weight', true)}${statCard('Medições guardadas', records.length, 'Recebidas da fonte configurada', 'sensor')}</div>
+      <div class="section-row"><h2>Histórico desta colmeia</h2></div><div class="grid chart-grid">${chartCard('Temperatura exterior', 'Média dos dois DHT11 · °C', records, 'outside-temperature')}${chartCard('Temperatura interior', 'Leitura do DHT22 · °C', records, 'inside-temperature')}${chartCard('Humidade', 'Média das leituras disponíveis · %', records, 'humidity')}${chartCard('Peso', 'Célula de carga · kg', records, 'weight')}</div>
+      <div class="two-col"><section><div class="section-row"><h2>Medições</h2></div>${latestReadingRows(records, 20, true)}</section><section><div class="section-row"><h2>Visitas e tarefas</h2></div>${activity.length ? `<div class="table-wrap"><table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th></tr></thead><tbody>${activity.map(a => `<tr><td>${fmtDate(a.date)}</td><td>${esc(a.type)}</td><td>${esc(a.title)} · ${esc(a.text || '')}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-state"><div><strong>Sem histórico de atividades</strong>Os registos desta colmeia aparecerão aqui.</div></div>`}</section></div>
       <div class="section-row"><button class="button" data-view="hives">← Voltar às colmeias</button><button class="button danger" data-action="delete-hive" data-id="${esc(h.identifier)}">${icon('trash')} Eliminar colmeia</button></div>`;
   }
 
