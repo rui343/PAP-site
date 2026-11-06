@@ -555,7 +555,7 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
           authMessage = 'Se existir uma conta para esse email, receberás uma mensagem para mudar a palavra-passe.'; authMessageKind = 'success'; render();
         } catch { authMessage = 'Não foi possível enviar a mensagem. Confirma o email e tenta novamente.'; authMessageKind = 'error'; render(); }
       }
-      if (action === 'theme-toggle') { setTheme(data.settings.theme === 'light' ? 'dark' : 'light'); renderTopbar(); }
+      if (action === 'theme-toggle') { setTheme(data.settings.theme === 'light' ? 'dark' : 'light'); render(); }
       if (action === 'add-hive') hiveForm();
       if (action === 'hive-detail') { selectedHive = id; view = 'hive-detail'; render(); }
       if (action === 'edit-hive') hiveForm(hiveFor(id));
