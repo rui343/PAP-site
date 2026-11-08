@@ -475,29 +475,95 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
   }
 
   function renderMaiaChat() {
-    const suggestions = chatMessages.length === 1 ? `<div class="maia-chat-suggestions"><span>Podes perguntar</span><button type="button" data-action="chat-suggestion" data-question="Como adiciono uma colmeia?">Adicionar colmeia</button><button type="button" data-action="chat-suggestion" data-question="O que mostram os DHT11 e DHT22?">Temperaturas</button><button type="button" data-action="chat-suggestion" data-question="Como vejo a previsão do tempo?">Previsão</button></div>` : '';
-    const messages = chatMessages.map(message => `<div class="maia-chat-message ${message.role === 'user' ? 'user' : 'assistant'}"><span>${message.role === 'user' ? 'Tu' : 'MAIA'}</span><p>${esc(message.text)}</p></div>`).join('');
-    return `<div class="maia-chat-widget">${chatOpen ? `<section class="maia-chat-panel" role="dialog" aria-modal="false" aria-labelledby="maia-chat-title"><header class="maia-chat-header"><div><strong id="maia-chat-title">Assistente MAIA</strong><small>Ajuda sobre o site e o apiário</small></div><button type="button" class="maia-chat-close" data-action="close-chat" aria-label="Fechar assistente">×</button></header><div class="maia-chat-feed" id="maia-chat-feed" aria-live="polite">${messages}${suggestions}</div><form id="maia-chat-form" class="maia-chat-form"><label class="sr-only" for="maia-chat-input">Escreve a tua pergunta</label><input id="maia-chat-input" name="question" maxlength="300" autocomplete="off" placeholder="Escreve uma pergunta…" required><button type="submit" aria-label="Enviar pergunta">${icon('arrow')}</button></form><p class="maia-chat-note">Respostas predefinidas · sem ligação à API do ChatGPT</p></section>` : ''}<button type="button" class="maia-chat-launcher" data-action="toggle-chat" aria-controls="maia-chat-panel" aria-expanded="${chatOpen}">${icon('chat')}<span>${chatOpen ? 'Fechar ajuda' : 'Ajuda MAIA'}</span></button></div>`;
+    const suggestions = chatMessages.length === 1
+      ? ['Como vejo as temperaturas?', 'Como ligo os sensores?', 'Como vejo o clima?', 'Como crio uma tarefa?']
+      : (chatMessages.at(-1)?.quickReplies || []);
+    const quickReplies = suggestions.length ? `<div class="maia-chat-suggestions"><span>${chatMessages.length === 1 ? 'Escolhe um tema ou escreve a tua pergunta' : 'Também podes perguntar'}</span>${suggestions.map(question => `<button type="button" data-action="chat-suggestion" data-question="${esc(question)}">${esc(question)}</button>`).join('')}</div>` : '';
+    const messages = chatMessages.map(message => `<div class="maia-chat-message ${message.role === 'user' ? 'user' : 'assistant'}"><span>${message.role === 'user' ? 'Tu' : 'MAIA'}</span><p>${esc(message.text)}</p>${message.page ? `<button type="button" class="maia-chat-page-button" data-action="chat-open-page" data-page="${esc(message.page)}">${esc(message.pageLabel || 'Abrir no painel')} ${icon('arrow')}</button>` : ''}</div>`).join('');
+    return `<div class="maia-chat-widget">${chatOpen ? `<section class="maia-chat-panel" role="dialog" aria-modal="false" aria-labelledby="maia-chat-title"><header class="maia-chat-header"><div class="maia-chat-avatar">${icon('bee')}</div><div><strong id="maia-chat-title">Assistente MAIA</strong><small>Ajuda prática para o teu apiário</small></div><button type="button" class="maia-chat-close" data-action="close-chat" aria-label="Fechar assistente">×</button></header><div class="maia-chat-feed" id="maia-chat-feed" aria-live="polite">${messages}${quickReplies}</div><form id="maia-chat-form" class="maia-chat-form"><label class="sr-only" for="maia-chat-input">Escreve a tua pergunta</label><input id="maia-chat-input" name="question" maxlength="300" autocomplete="off" placeholder="Ex.: qual foi a última temperatura?" required><button type="submit" aria-label="Enviar pergunta">${icon('arrow')}</button></form><p class="maia-chat-note">Ajuda automática da MAIA · sem API paga</p></section>` : ''}<button type="button" class="maia-chat-launcher" data-action="toggle-chat" aria-controls="maia-chat-panel" aria-expanded="${chatOpen}">${icon('chat')}<span>${chatOpen ? 'Fechar ajuda' : 'Ajuda MAIA'}</span></button></div>`;
+  }
+  function chatReply(text, page = '', pageLabel = '', quickReplies = []) {
+    return { text, page, pageLabel, quickReplies };
+  }
+  function answerLatestMeasurement() {
+    const records = sortedMeasurements(data.measurements.filter(record => !selectedHive || record.hiveId === selectedHive));
+    const latest = records.at(-1);
+    if (!latest) return chatReply(`Ainda não há leituras reais${selectedHive ? ` para a colmeia ${hiveLabel(selectedHive)}` : ''}. Quando a API dos sensores enviar medições, elas aparecem aqui e na página Monitorização.`, 'monitoring', 'Abrir monitorização', ['Como ligo os sensores?', 'O que medem os DHT11 e o DHT22?']);
+    const values = sensorValues(latest), lines = [];
+    const outside = average(values.t11);
+    if (outside != null) lines.push(`Exterior (média dos DHT11): ${num(outside)} °C`);
+    if (values.t22 != null) lines.push(`Interior (DHT22): ${num(values.t22)} °C`);
+    if (average(values.hAll) != null) lines.push(`Humidade média: ${num(average(values.hAll))} %`);
+    if (values.weight != null) lines.push(`Peso: ${num(values.weight)} kg`);
+    if (!lines.length) return chatReply(`Encontrei a última medição de ${hiveLabel(latest.hiveId)}, mas não tem valores numéricos de temperatura, humidade ou peso.`, 'monitoring', 'Abrir monitorização');
+    const when = latest.measuredAt ? fmtDateTime(latest.measuredAt) : 'data não indicada';
+    return chatReply(`Última leitura${selectedHive ? ` de ${hiveLabel(latest.hiveId)}` : ` (${hiveLabel(latest.hiveId)})`} · ${when}\n${lines.join('\n')}\n\nEstes valores são os que a fonte configurada enviou para a MAIA.`, 'monitoring', 'Ver histórico de medições', ['Como configuro os sensores?', 'O que significam estas temperaturas?']);
+  }
+  function answerIpmaChat() {
+    const placeId = selectedIpmaLocalityId();
+    const place = ipmaState.places?.find(item => String(item.globalIdLocal) === placeId);
+    if (ipmaState.loadingPlaces || ipmaState.loadingForecast) return chatReply('Estou a carregar a previsão do IPMA. Espera um momento e pergunta outra vez, ou consulta o cartão do clima no Painel principal.', 'dashboard', 'Abrir painel principal');
+    if (ipmaState.error) return chatReply('Não consegui obter agora os dados do IPMA. Confirma a ligação à Internet e tenta novamente no botão de atualizar do cartão do clima.', 'dashboard', 'Tentar no painel', ['Como escolho a localidade?']);
+    if (place && ipmaState.forecastFor === placeId && ipmaState.forecast?.length) {
+      const days = ipmaState.forecast.slice(0, 5).map(item => {
+        const date = fmtDate(item.forecastDate, { weekday: 'short', day: '2-digit', month: 'short' });
+        const weather = ipmaState.weatherTypes.get(String(item.idWeatherType)) || 'Previsão diária';
+        const rain = item.precipitaProb ?? item.probPrecipita;
+        const temperatures = `${item.tMin == null ? '—' : num(item.tMin, 0)}°/${item.tMax == null ? '—' : num(item.tMax, 0)}°`;
+        return `${date}: ${weather}, ${temperatures}${rain == null ? '' : `, chuva ${num(rain, 0)}%`}`;
+      });
+      return chatReply(`Previsão do IPMA para ${place.local}:\n${days.join('\n')}\n\nA API aberta mostra até 5 dias. No cartão do Painel principal tens o link oficial para consultar 10 dias.`, 'dashboard', 'Abrir painel principal', ['Como escolho outra localidade?', 'Ver última leitura']);
+    }
+    return chatReply('Para consultar o clima, abre o Painel principal e escolhe a localidade mais próxima do apiário no cartão do IPMA. A previsão diária da API aberta mostra até 5 dias; o cartão tem um link para a previsão oficial de 10 dias.', 'dashboard', 'Escolher localidade no painel', ['Ver última leitura']);
   }
   function answerMaiaChat(question) {
-    const q = String(question || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    if (/chatgpt|inteligencia artificial|\bia\b/.test(q)) return 'Este assistente usa respostas predefinidas sobre a MAIA. Não é o ChatGPT generativo e não envia mensagens para a OpenAI; por isso, não precisa de chave nem de pagamento por utilização.';
-    if (/dht11|dht22|temperatur|exterior|interior/.test(q)) return 'Na ficha de cada colmeia, os dois DHT11 calculam a média da temperatura exterior. O DHT22 mostra a temperatura interior. As leituras só aparecem quando a API dos sensores as envia para a MAIA.';
-    if (/sensor|arduino|esp32|api|ligar/.test(q)) return 'Para ligar os sensores, abre Definições → Fonte de medições. Indica o endereço da API que envia os dados e guarda a ligação. A resposta tem de ser JSON, incluir o identificador da colmeia e permitir ligação a partir do site.';
-    if (/previsa|ipma|clima|tempo/.test(q)) return 'No Painel principal, escolhe a localidade do apiário no cartão “Clima previsto no apiário”. A API aberta do IPMA mostra até 5 dias; o cartão tem também um link para a previsão oficial de 10 dias.';
-    if (/colmeia|apiario|adicionar colmeia|criar colmeia/.test(q)) return 'Depois de entrares no painel, abre Colmeias → Adicionar colmeia. Preenche a identificação, o nome ou tipo e, se quiseres, a localização e a data de instalação. No fim, guarda.';
-    if (/conta|regist|utilizador|login|entrar|palavra-passe|senha/.test(q)) return 'Clica em “Entrar no painel”. Para uma conta nova, escolhe “Novo utilizador? Criar conta”, preenche o email e a palavra-passe e confirma o email recebido. Se já tens conta, inicia sessão; se esqueceste a palavra-passe, usa essa opção na página de entrada.';
-    if (/tema|claro|escuro|contraste|cor/.test(q)) return 'Usa o botão com o ícone do sol ou da lua no topo do site para alternar entre os temas claro e escuro. A escolha fica guardada neste navegador.';
-    if (/visita|tarefa|atividade/.test(q)) return 'Abre “Visitas e tarefas” no menu. Aí podes registar visitas ao apiário, criar tarefas, associá-las a uma colmeia e marcar tarefas como concluídas.';
-    if (/camara|imagem|foto|fotografia/.test(q)) return 'Abre “Câmara e imagens” para configurar o endereço da ESP32-CAM e guardar fotografias associadas a uma colmeia. A câmara tem de estar acessível na rede e o endereço depende do firmware.';
-    if (/github|publicar|repositorio|site/.test(q)) return 'O site é publicado pelo GitHub Pages. Os ficheiros principais são index.html, styles.css e app.js. Depois de substituir os ficheiros no repositório, confirma em “Commit changes” e aguarda a publicação.';
-    if (/ola|obrigad|ajuda/.test(q)) return 'Com certeza. Experimenta perguntar sobre colmeias, sensores, temperaturas, previsão do IPMA, contas ou temas claro e escuro.';
-    return 'Ainda não tenho uma resposta predefinida para isso. Experimenta perguntar sobre: colmeias, sensores, DHT11/DHT22, previsão do IPMA, contas, visitas ou temas.';
+    const q = String(question || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[’']/g, ' ');
+    if (/^(ola|oi|bom dia|boa tarde|boa noite|obrigad\w*)\b/.test(q)) return chatReply('Olá! Posso explicar as funções do site e mostrar os dados que já chegaram dos sensores. Escolhe um tema abaixo ou escreve a tua pergunta.', '', '', ['Ver última leitura', 'Como crio uma colmeia?', 'Como vejo o clima?', 'Como ligo os sensores?']);
+    if (/chatgpt|inteligencia artificial|\bia\b/.test(q)) return chatReply('Este é um assistente de ajuda da MAIA com respostas preparadas e dados do teu painel. Não é o ChatGPT generativo; as perguntas ficam neste navegador e não são enviadas para uma API paga.', '', '', ['O que sabes fazer?', 'Ver última leitura', 'Ajuda com sensores']);
+    if (/quant[ao]s?.{0,18}(colmeia|apiario)|numero de colmeias|lista de colmeias/.test(q)) {
+      const labels = data.hives.slice(0, 6).map(hive => hive.identifier).filter(Boolean);
+      const rest = Math.max(0, data.hives.length - labels.length);
+      const summary = data.hives.length ? `Tens ${data.hives.length} colmeia${data.hives.length === 1 ? '' : 's'} registada${data.hives.length === 1 ? '' : 's'}${labels.length ? `: ${labels.join(', ')}${rest ? ` e mais ${rest}` : ''}` : ''}.` : 'Ainda não tens colmeias registadas nesta conta e neste navegador.';
+      return chatReply(`${summary} Podes ver, abrir ou adicionar colmeias na página Colmeias.`, 'hives', data.hives.length ? 'Abrir colmeias' : 'Adicionar a primeira colmeia', ['Como adiciono uma colmeia?']);
+    }
+    if (/quant[ao]s?.{0,20}(medic\w*|leit\w*)|numero de medic\w*|numero de leit\w*/.test(q)) {
+      const count = data.measurements.length;
+      return chatReply(`Há ${count} ${count === 1 ? 'medição guardada' : 'medições guardadas'} neste navegador.`, 'monitoring', 'Abrir monitorização', ['Ver última leitura', 'Como ligo os sensores?']);
+    }
+    if (/(ultima|mais recente|atual|agora|qual e|quanto).{0,35}(medic\w*|leit\w*|temperatur\w*|humidad\w*|peso)|(medic\w*|leit\w*|temperatur\w*|humidad\w*|peso).{0,35}(agora|atual|ultima|mais recente)/.test(q)) return answerLatestMeasurement();
+    if (/(temperatur\w*|humidad\w*|peso|medic\w*|leit\w*)/.test(q) && !/(como|onde|o que|explica|diferenca|sensor|dht|exterior|interior)/.test(q)) return answerLatestMeasurement();
+    if (/dht11|dht22|sensor|temperatur|exterior|interior/.test(q) && /(dht|sensor|exterior|interior|como vejo|como consultar|o que mostra|significa)/.test(q)) {
+      return chatReply('Na ficha de cada colmeia, a temperatura exterior é a média das leituras dos dois DHT11; a temperatura interior vem do DHT22. A humidade é calculada com as leituras disponíveis. Para ver os valores, abre uma colmeia ou Monitorização. Se aparecer “Sem dados”, a API ainda não enviou uma leitura válida.', 'monitoring', 'Abrir monitorização', ['Ver última leitura', 'Como ligo os sensores?']);
+    }
+    if (/sensor|arduino|esp32|\bapi\b|ligar|ligo|ligacao|fonte de medicao|configurar os dados/.test(q)) return chatReply('Para receber medições: 1) regista as colmeias e usa o mesmo identificador na API; 2) em Definições → Fonte de medições, cola o URL; 3) guarda. A API tem de permitir pedidos do site (CORS) e devolver JSON com `measurements`, `hiveId`, `measuredAt`, `dht11_1`, `dht11_2`, `dht22` e `weightKg`. Depois, usa “Sincronizar” na Monitorização. Se quiseres, posso explicar o formato esperado.', 'settings', 'Abrir definições', ['O que é CORS?', 'Ver última leitura']);
+    if (/cors/.test(q)) return chatReply('CORS é uma regra do servidor da API. O servidor tem de autorizar pedidos vindos de `rui343.github.io`; se não autorizar, o navegador bloqueia a ligação mesmo que o URL abra noutra página. A MAIA não consegue alterar essa regra por ti: é configurada no servidor do Arduino/ESP32 ou da API.', 'settings', 'Ver configuração da fonte');
+    if (/previsa|ipma|clima|tempo|meteorolog/.test(q)) return answerIpmaChat();
+    if (/colmeia|apiario|adicionar colmeia|criar colmeia|registar colmeia/.test(q)) return chatReply('Para adicionar: abre Colmeias → Adicionar colmeia; escreve um identificador único (por exemplo, COL-01) e o nome ou tipo; se quiseres, acrescenta localização, data e notas; no fim, guarda. Usa esse mesmo identificador nas medições da API.', 'hives', 'Abrir colmeias', ['Como altero uma colmeia?', 'Ver última leitura']);
+    if (/conta|regist|utilizador|login|entrar|palavra[ -]passe|senha|e[- ]?mail/.test(q)) return chatReply('Para criar conta, clica em “Entrar no painel” → “Criar conta”, escreve o email e uma palavra-passe com pelo menos 8 caracteres e confirma o email recebido. Se a mensagem não aparecer, verifica Spam. Para uma conta existente, inicia sessão; se não te lembras da palavra-passe, usa “Recuperar palavra-passe”.', 'auth', 'Ir para a entrada', ['Não recebi o email', 'Esqueci a palavra-passe']);
+    if (/nao recebi|email de confirmacao|confirmar email|mensagem de confirmacao/.test(q)) return chatReply('Verifica as pastas Spam e Lixo. Na página de entrada, tenta iniciar sessão com esse email: se ainda não estiver confirmado, a MAIA pede uma nova confirmação. Confirma também que escreveste o email corretamente.', 'auth', 'Abrir entrada');
+    if (/esqueci|recuperar|repor|mudar palavra|redefinir/.test(q)) return chatReply('Na página de entrada, escreve o teu email e escolhe “Recuperar palavra-passe”. O Firebase envia uma mensagem com os passos seguintes; verifica também Spam.', 'auth', 'Abrir entrada');
+    if (/tema|claro|escuro|contraste|cor/.test(q)) return chatReply(`O tema atual é ${data.settings.theme === 'dark' ? 'escuro' : 'claro'}. Usa o botão do sol ou da lua no topo para alternar. A escolha fica guardada neste navegador e deve manter-se depois de atualizares a página.`, 'dashboard', 'Voltar ao painel');
+    if (/taref/.test(q) && /(quant|pendente|aberta|atrasad|concluid)/.test(q)) {
+      const pending = data.tasks.filter(task => !task.done).length;
+      const completed = data.tasks.length - pending;
+      const overdue = data.tasks.filter(task => !task.done && task.dueDate && task.dueDate < today()).length;
+      const summary = /concluid/.test(q) ? `Tens ${completed} tarefa${completed === 1 ? '' : 's'} concluída${completed === 1 ? '' : 's'}.` : `Tens ${pending} tarefa${pending === 1 ? '' : 's'} por concluir${overdue ? `, das quais ${overdue} já passaram da data` : ''}.`;
+      return chatReply(summary, 'activities', 'Abrir tarefas', ['Como crio uma tarefa?', 'Quantas visitas registei?']);
+    }
+    if (/visita/.test(q) && /(quant|regist|hist[oó]rico)/.test(q)) return chatReply(`Tens ${data.visits.length} visita${data.visits.length === 1 ? '' : 's'} registada${data.visits.length === 1 ? '' : 's'}.`, 'activities', 'Ver visitas');
+    if (/visita|tarefa|atividade|calendario|trabalho/.test(q)) return chatReply('Em Visitas e tarefas, escolhe “Nova visita” para guardar uma visita ou “Nova tarefa” para registar algo a fazer. Podes associar cada registo a uma colmeia; depois, marca a tarefa como concluída quando terminares.', 'activities', 'Abrir visitas e tarefas', ['Como adiciono uma colmeia?', 'Ver alertas']);
+    if (/alerta|limite|temperatura minima|temperatura maxima/.test(q)) return chatReply('Os alertas só aparecem depois de definires limites em Definições → Limites de alerta e de receberes medições reais. Podes definir limites de temperatura, humidade e peso; a MAIA compara as leituras com os valores que escolheres.', 'settings', 'Definir limites');
+    if (/camara|imagem|foto|fotografia|esp32 cam/.test(q)) return chatReply('Em Câmara e imagens podes introduzir o endereço do stream da câmara e guardar fotografias associadas a uma colmeia. O endereço tem de estar acessível no navegador; a MAIA não cria nem configura o firmware da câmara.', 'camera', 'Abrir câmara e imagens');
+    if (/backup|copia de seguranca|export|import|perdi os dados|dados desapareceram/.test(q)) return chatReply('Os registos ficam guardados neste navegador e não sincronizam automaticamente entre dispositivos. Para guardar uma cópia, abre Definições → Dados e cópias de segurança → Exportar dados. Para recuperar, usa “Importar cópia” no mesmo local.', 'settings', 'Abrir cópias de segurança');
+    if (/github|publicar|repositorio|site|atualizar pagina/.test(q)) return chatReply('O site é publicado pelo GitHub Pages. Depois de carregares os ficheiros para a branch `main` e confirmares “Commit changes”, abre Actions e espera que “pages build and deployment” fique verde. Depois atualiza o site com Ctrl + F5.', 'dashboard', 'Abrir painel principal');
+    if (/o que sabes|o que podes|ajuda|opcoes|menu/.test(q)) return chatReply('Posso ajudar com colmeias, temperaturas e sensores, previsão IPMA, contas, visitas e tarefas, alertas, fotografias, tema claro/escuro, cópias de segurança e publicação do site. Escolhe um tema abaixo.', '', '', ['Ver última leitura', 'Como ligo os sensores?', 'Como vejo o clima?', 'Como crio uma tarefa?']);
+    return chatReply('Ainda não encontrei uma resposta certa para essa pergunta. Posso ajudar com colmeias, sensores, temperaturas, clima do IPMA, contas, tarefas, alertas ou cópias de segurança. Experimenta escolher um tema abaixo ou escreve a pergunta de outra forma.', '', '', ['Ver última leitura', 'Como adiciono uma colmeia?', 'Como vejo o clima?', 'Ajuda com a conta']);
   }
   function sendMaiaChatMessage(question) {
     const cleanQuestion = String(question || '').trim().slice(0, 300);
     if (!cleanQuestion) return;
-    chatMessages.push({ role: 'user', text: cleanQuestion }, { role: 'assistant', text: answerMaiaChat(cleanQuestion) });
+    const reply = answerMaiaChat(cleanQuestion);
+    chatMessages.push({ role: 'user', text: cleanQuestion }, { role: 'assistant', ...reply });
     if (chatMessages.length > 25) chatMessages.splice(1, chatMessages.length - 25);
     render();
     const feed = document.querySelector('#maia-chat-feed');
@@ -663,6 +729,13 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, se
       if (action === 'toggle-chat') { chatOpen = !chatOpen; render(); if (chatOpen) document.querySelector('#maia-chat-input')?.focus(); }
       if (action === 'close-chat') { chatOpen = false; render(); }
       if (action === 'chat-suggestion') sendMaiaChatMessage(el.dataset.question);
+      if (action === 'chat-open-page') {
+        const target = el.dataset.page;
+        if (target === 'auth') { view = 'auth'; authMode = 'signin'; authMessage = ''; authMessageKind = 'info'; }
+        else if (!currentUser) { view = 'auth'; authMode = 'signin'; authMessage = ''; authMessageKind = 'info'; }
+        else if (['dashboard', 'hives', 'monitoring', 'activities', 'camera', 'settings'].includes(target)) { view = target; if (target === 'hives') selectedHive = null; }
+        chatOpen = true; render(); document.querySelector('#maia-chat-input')?.focus(); window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
       if (action === 'menu') document.querySelector('#top-nav')?.classList.toggle('open');
       if (action === 'open-auth') {
         if (currentUser) view = 'dashboard';
